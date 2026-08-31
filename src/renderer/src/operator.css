@@ -1,0 +1,103 @@
+/* Operator safety additions. Kept separate from the core stylesheet so the
+   access-policy feature stays easy to review or move independently. */
+
+.access-seg button {
+  min-width: 112px;
+}
+
+.access-lock-note {
+  color: var(--ink);
+  font-weight: 550;
+}
+
+.access-auth-note {
+  display: block;
+  margin-top: 4px;
+  line-height: 1.45;
+}
+
+.connection-posture {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 12px 13px;
+  margin-top: 2px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper-sunken);
+}
+
+.connection-posture.posture-safe {
+  border-color: color-mix(in srgb, var(--ok) 25%, var(--line));
+  background: color-mix(in srgb, var(--ok-soft) 70%, var(--paper));
+}
+
+.connection-posture.posture-warn {
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--line));
+  background: color-mix(in srgb, var(--danger-soft) 72%, var(--paper));
+}
+
+.connection-posture-copy {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.connection-posture-kicker {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-faint);
+  font-weight: 650;
+}
+
+.connection-posture-copy strong {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.connection-posture-copy > span:last-child {
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.connection-posture-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  max-width: 150px;
+}
+
+.connection-posture-tags span {
+  padding: 3px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--ink-soft);
+  font-size: 9.5px;
+  line-height: 1;
+  white-space: nowrap;
+  text-transform: capitalize;
+  background: var(--paper);
+}
+
+.connection-posture-tags span.locked {
+  color: var(--ink);
+  font-weight: 650;
+  border-color: color-mix(in srgb, var(--ok) 28%, var(--line-strong));
+}
+
+@media (max-width: 760px) {
+  .connection-posture {
+    flex-direction: column;
+  }
+
+  .connection-posture-tags {
+    justify-content: flex-start;
+    max-width: none;
+  }
+}

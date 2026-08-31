@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import type {
+  AccessMode,
   ConnectionConfig,
   ConnectionSummary,
   Driver,
@@ -15,6 +16,7 @@ interface Props {
 }
 
 type SshAuth = 'password' | 'key' | 'agent'
+type PostureTone = 'safe' | 'neutral' | 'warn'
 
 const DRIVERS: { id: Driver; label: string; icon: React.JSX.Element; port: number }[] = [
   { id: 'postgres', label: 'PostgreSQL', icon: <IconPostgres />, port: 5432 },
@@ -26,6 +28,19 @@ const ENVIRONMENTS: { id: Environment; label: string; note: string }[] = [
   { id: 'local', label: 'Local', note: '' },
   { id: 'staging', label: 'Staging', note: '' },
   { id: 'production', label: 'Production', note: 'Writes ask for confirmation first.' }
+]
+
+const ACCESS_MODES: { id: AccessMode; label: string; note: string }[] = [
+  {
+    id: 'read-write',
+    label: 'Read & write',
+    note: 'Normal editor, grid, schema and AI actions. Production write confirmations still apply.'
+  },
+  {
+    id: 'read-only',
+    label: 'Read only',
+    note: 'Strict local guard: only a single plainly read-only SELECT can execute anywhere in OpenTable.'
+  }
 ]
 
 const defaultPort = (d: Driver): number => DRIVERS.find((x) => x.id === d)?.port ?? 0
@@ -53,6 +68,74 @@ function parseConnectionUrl(raw: string): Partial<ConnectionConfig> | null {
   }
 }
 
+/**
+ * Only classify addresses we can know locally. A private DNS hostname may also
+ * be internal, so an unknown hostname is never labelled "public" as a fact.
+ */
+function isKnownLocalOrPrivateHost(raw: string): boolean {
+  const host = raw.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  if (!host) return false
+  if (host === 'localhost' || host === '::1' || host.endsWith('.localhost')) return true
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return true
+  const match172 = /^172\.(\d{1,3})\./.exec(host)
+  if (match172) {
+    const second = Number(match172[1])
+    if (second >= 16 && second <= 31) return true
+  }
+  if (/^(fc|fd)[0-9a-f]{2}:/i.test(host) || /^fe[89ab][0-9a-f]:/i.test(host)) return true
+  return host.endsWith('.internal') || host.endsWith('.local')
+}
+
+function connectionPosture(opts: {
+  isSqlite: boolean
+  host: string
+  sshOn: boolean
+  sshHost: string
+  ssl: boolean
+  sslInsecure: boolean
+}): { tone: PostureTone; title: string; detail: string } {
+  if (opts.isSqlite) {
+    return {
+      tone: 'safe',
+      title: 'Local database file',
+      detail: 'No network database port is involved.'
+    }
+  }
+  if (opts.sshOn) {
+    return {
+      tone: 'safe',
+      title: 'SSH tunnel',
+      detail: `The database is reached through ${opts.sshHost || 'the bastion host'} instead of exposing its port to this machine.`
+    }
+  }
+  if (opts.ssl && !opts.sslInsecure) {
+    return {
+      tone: 'safe',
+      title: 'Verified TLS',
+      detail: 'Traffic to the database is encrypted and the server certificate is verified.'
+    }
+  }
+  if (opts.ssl && opts.sslInsecure) {
+    return {
+      tone: 'warn',
+      title: 'TLS without certificate verification',
+      detail: 'Traffic is encrypted, but OpenTable cannot verify which server it reached.'
+    }
+  }
+  if (isKnownLocalOrPrivateHost(opts.host)) {
+    return {
+      tone: 'neutral',
+      title: 'Local / private address',
+      detail: 'No TLS is configured. Keep this database on a trusted private network, container network or host-only interface.'
+    }
+  }
+  return {
+    tone: 'warn',
+    title: 'Direct connection without TLS',
+    detail: 'If this hostname is reachable over an untrusted or public network, use SSH, verified TLS, or your provider’s private network instead.'
+  }
+}
+
 export default function ConnectionModal({
   editing,
   onSave,
@@ -71,6 +154,7 @@ export default function ConnectionModal({
   const [database, setDatabase] = useState(editing?.database ?? '')
   const [filePath, setFilePath] = useState(editing?.filePath ?? '')
   const [environment, setEnvironment] = useState<Environment>(editing?.environment ?? 'local')
+  const [accessMode, setAccessMode] = useState<AccessMode>(editing?.accessMode ?? 'read-write')
 
   const [ssl, setSsl] = useState(editing?.ssl ?? false)
   const [sslInsecure, setSslInsecure] = useState(editing?.sslInsecure ?? false)
@@ -160,6 +244,7 @@ export default function ConnectionModal({
     database: isSqlite ? '' : database.trim(),
     filePath: isSqlite ? filePath.trim() : undefined,
     environment,
+    accessMode,
     ssl: isSqlite ? false : ssl,
     sslInsecure: !isSqlite && ssl ? sslInsecure : false,
     ssh:
@@ -254,6 +339,11 @@ export default function ConnectionModal({
   const sshSummary = `Through ${sshUser ? sshUser + '@' : ''}${sshHost} · ${
     sshAuth === 'key' ? 'private key' : sshAuth === 'agent' ? 'ssh-agent' : 'password'
   }`
+
+  const posture = useMemo(
+    () => connectionPosture({ isSqlite, host, sshOn, sshHost, ssl, sslInsecure }),
+    [isSqlite, host, sshOn, sshHost, ssl, sslInsecure]
+  )
 
   return (
     <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
@@ -397,6 +487,30 @@ export default function ConnectionModal({
             )}
           </div>
 
+          <div className="field access-policy-field">
+            <label>Access policy</label>
+            <div className="seg access-seg">
+              {ACCESS_MODES.map((mode) => (
+                <button
+                  key={mode.id}
+                  className={accessMode === mode.id ? 'on' : ''}
+                  onClick={() => setAccessMode(mode.id)}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+            <span className={`field-note ${accessMode === 'read-only' ? 'access-lock-note' : ''}`}>
+              {ACCESS_MODES.find((mode) => mode.id === accessMode)?.note}
+            </span>
+            {accessMode === 'read-only' && (
+              <span className="field-note access-auth-note">
+                This is defense in depth, not authorization. For staff access, also use a least-privilege
+                database role; then the database itself remains the final authority.
+              </span>
+            )}
+          </div>
+
           {!isSqlite && (
             <>
               <label className="checkline strong">
@@ -413,117 +527,116 @@ export default function ConnectionModal({
 
               {sshOn && (
                 <>
-                    {sshHosts.length > 0 && (
-                      <div className="field">
-                        <label>
-                          From ~/.ssh/config<span className="label-opt">fills the fields below</span>
-                        </label>
-                        <select
-                          value=""
-                          onChange={(e) => e.target.value && applySshHost(e.target.value)}
-                        >
-                          <option value="">Choose a saved host…</option>
-                          {sshHosts.map((h) => (
-                            <option key={h.alias} value={h.alias}>
-                              {h.alias}
-                              {h.hostName !== h.alias ? ` — ${h.user ? h.user + '@' : ''}${h.hostName}` : ''}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    <div className="field-row c31">
-                      <div className="field">
-                        <label>SSH host</label>
-                        <input
-                          value={sshHost}
-                          onChange={(e) => setSshHost(e.target.value)}
-                          placeholder="bastion.example.com"
-                        />
-                      </div>
-                      <div className="field">
-                        <label>Port</label>
-                        <input
-                          type="number"
-                          value={sshPort}
-                          onChange={(e) => setSshPort(Number(e.target.value))}
-                        />
-                      </div>
-                    </div>
-
+                  {sshHosts.length > 0 && (
                     <div className="field">
-                      <label>SSH user</label>
+                      <label>
+                        From ~/.ssh/config<span className="label-opt">fills the fields below</span>
+                      </label>
+                      <select value="" onChange={(e) => e.target.value && applySshHost(e.target.value)}>
+                        <option value="">Choose a saved host…</option>
+                        {sshHosts.map((h) => (
+                          <option key={h.alias} value={h.alias}>
+                            {h.alias}
+                            {h.hostName !== h.alias
+                              ? ` — ${h.user ? h.user + '@' : ''}${h.hostName}`
+                              : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  <div className="field-row c31">
+                    <div className="field">
+                      <label>SSH host</label>
                       <input
-                        value={sshUser}
-                        onChange={(e) => setSshUser(e.target.value)}
-                        placeholder="ubuntu"
+                        value={sshHost}
+                        onChange={(e) => setSshHost(e.target.value)}
+                        placeholder="bastion.example.com"
                       />
                     </div>
-
                     <div className="field">
-                      <label>Authenticate with</label>
-                      <div className="seg">
-                        <button
-                          className={sshAuth === 'agent' ? 'on' : ''}
-                          onClick={() => setSshAuth('agent')}
-                        >
-                          Agent
-                        </button>
-                        <button
-                          className={sshAuth === 'key' ? 'on' : ''}
-                          onClick={() => setSshAuth('key')}
-                        >
-                          <IconKey /> Key
-                        </button>
-                        <button
-                          className={sshAuth === 'password' ? 'on' : ''}
-                          onClick={() => setSshAuth('password')}
-                        >
-                          Password
-                        </button>
-                      </div>
+                      <label>Port</label>
+                      <input
+                        type="number"
+                        value={sshPort}
+                        onChange={(e) => setSshPort(Number(e.target.value))}
+                      />
                     </div>
+                  </div>
 
-                    {sshAuth === 'agent' ? (
-                      <span className="field-note">
-                        Uses the keys already loaded in your ssh-agent — the same ones{' '}
-                        <code>ssh</code> uses. Check them with <code>ssh-add -l</code>.
-                      </span>
-                    ) : sshAuth === 'password' ? (
+                  <div className="field">
+                    <label>SSH user</label>
+                    <input
+                      value={sshUser}
+                      onChange={(e) => setSshUser(e.target.value)}
+                      placeholder="ubuntu"
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label>Authenticate with</label>
+                    <div className="seg">
+                      <button
+                        className={sshAuth === 'agent' ? 'on' : ''}
+                        onClick={() => setSshAuth('agent')}
+                      >
+                        Agent
+                      </button>
+                      <button
+                        className={sshAuth === 'key' ? 'on' : ''}
+                        onClick={() => setSshAuth('key')}
+                      >
+                        <IconKey /> Key
+                      </button>
+                      <button
+                        className={sshAuth === 'password' ? 'on' : ''}
+                        onClick={() => setSshAuth('password')}
+                      >
+                        Password
+                      </button>
+                    </div>
+                  </div>
+
+                  {sshAuth === 'agent' ? (
+                    <span className="field-note">
+                      Uses the keys already loaded in your ssh-agent — the same ones <code>ssh</code>{' '}
+                      uses. Check them with <code>ssh-add -l</code>.
+                    </span>
+                  ) : sshAuth === 'password' ? (
+                    <div className="field">
+                      <label>SSH password</label>
+                      <input
+                        type="password"
+                        value={sshPassword}
+                        onChange={(e) => setSshPassword(e.target.value)}
+                      />
+                    </div>
+                  ) : (
+                    <>
                       <div className="field">
-                        <label>SSH password</label>
+                        <label>Private key</label>
+                        <div className="file-row">
+                          <input
+                            value={sshKeyPath}
+                            onChange={(e) => setSshKeyPath(e.target.value)}
+                            placeholder="~/.ssh/id_ed25519"
+                          />
+                          <button className="btn-mini" onClick={pickKey}>
+                            Browse…
+                          </button>
+                        </div>
+                      </div>
+                      <div className="field">
+                        <label>
+                          Key passphrase<span className="label-opt">only if encrypted</span>
+                        </label>
                         <input
                           type="password"
-                          value={sshPassword}
-                          onChange={(e) => setSshPassword(e.target.value)}
+                          value={sshPassphrase}
+                          onChange={(e) => setSshPassphrase(e.target.value)}
                         />
                       </div>
-                    ) : (
-                      <>
-                        <div className="field">
-                          <label>Private key</label>
-                          <div className="file-row">
-                            <input
-                              value={sshKeyPath}
-                              onChange={(e) => setSshKeyPath(e.target.value)}
-                              placeholder="~/.ssh/id_ed25519"
-                            />
-                            <button className="btn-mini" onClick={pickKey}>
-                              Browse…
-                            </button>
-                          </div>
-                        </div>
-                        <div className="field">
-                          <label>
-                            Key passphrase<span className="label-opt">only if encrypted</span>
-                          </label>
-                          <input
-                            type="password"
-                            value={sshPassphrase}
-                            onChange={(e) => setSshPassphrase(e.target.value)}
-                          />
-                        </div>
                     </>
                   )}
                 </>
@@ -558,6 +671,20 @@ export default function ConnectionModal({
               )}
             </>
           )}
+
+          <div className={`connection-posture posture-${posture.tone}`}>
+            <div className="connection-posture-copy">
+              <span className="connection-posture-kicker">Connection safety</span>
+              <strong>{posture.title}</strong>
+              <span>{posture.detail}</span>
+            </div>
+            <div className="connection-posture-tags">
+              <span>{environment}</span>
+              <span className={accessMode === 'read-only' ? 'locked' : ''}>
+                {accessMode === 'read-only' ? 'read only' : 'read & write'}
+              </span>
+            </div>
+          </div>
         </div>
 
         {testResult && (

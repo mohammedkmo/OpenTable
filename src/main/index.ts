@@ -4,7 +4,7 @@ import * as store from './store'
 import * as db from './db'
 import * as ai from './ai'
 import { checkForUpdates, getUpdateState, initUpdater, quitAndInstall } from './updater'
-import { isDestructive, isUnscopedWrite } from './sqlutil'
+import { canRunInAccessMode, isDestructive, isUnscopedWrite } from './sqlutil'
 import { readSshHosts } from './sshconfig'
 import { splitStatements } from '../shared/sqlscan'
 import type {
@@ -15,6 +15,9 @@ import type {
   HistoryEntry,
   PendingChange
 } from '../shared/types'
+
+const READ_ONLY_ERROR =
+  'This connection is read-only. Switch it to Read & write to make changes, or use a database role with the exact permissions this operator needs.'
 
 function backgroundFor(): string {
   return nativeTheme.shouldUseDarkColors ? '#191919' : '#ffffff'
@@ -77,10 +80,27 @@ function registerHandlers(): void {
 
   ipcMain.handle('db:query', async (_e, id: string, sql: string) => {
     const settings = store.getSettings()
-    const cfg = db.getConfig(id)
+    // Policy comes from the saved config first so changing Read & write ->
+    // Read only takes effect immediately, even if an existing socket is still
+    // carrying the connection config it was opened with.
+    const cfg = store.getFullConfig(id) ?? db.getConfig(id)
+    const access = canRunInAccessMode(cfg?.accessMode, sql)
+    if (!access.allowed) return { ok: false, error: access.reason ?? READ_ONLY_ERROR }
+
     const started = Date.now()
     try {
       const result = await db.runQuery(id, sql, { rowLimit: settings.defaultRowLimit })
+      // A read-only connection must also look read-only in the grid. Removing
+      // source identity disables inline edit affordances before the user can
+      // stage a change; the main-process guards below remain the hard stop.
+      if (cfg?.accessMode === 'read-only') {
+        result.sets = result.sets.map((set) => ({
+          ...set,
+          sourceTable: undefined,
+          primaryKey: undefined,
+          readOnlyReason: 'Connection is read-only'
+        }))
+      }
       const rowCount = result.sets.reduce((n, s) => n + s.rowCount, 0)
       store.addHistory({
         id: crypto.randomUUID(),
@@ -143,18 +163,25 @@ function registerHandlers(): void {
   })
   ipcMain.handle(
     'db:applyChanges',
-    (_e, id: string, table: { schema: string; name: string }, changes: PendingChange[]) =>
-      db.applyChanges(id, table, changes)
+    (_e, id: string, table: { schema: string; name: string }, changes: PendingChange[]) => {
+      const cfg = store.getFullConfig(id) ?? db.getConfig(id)
+      if (cfg?.accessMode === 'read-only') {
+        return { ok: false, error: READ_ONLY_ERROR, affected: 0, statements: [] }
+      }
+      return db.applyChanges(id, table, changes)
+    }
   )
 
-  ipcMain.handle('db:alterTable', (_e, id: string, statements: string[]) =>
-    db.applyAlter(id, statements)
-  )
+  ipcMain.handle('db:alterTable', (_e, id: string, statements: string[]) => {
+    const cfg = store.getFullConfig(id) ?? db.getConfig(id)
+    if (cfg?.accessMode === 'read-only') return { ok: false, error: READ_ONLY_ERROR, applied: 0 }
+    return db.applyAlter(id, statements)
+  })
 
   /* ————— safety ————— */
   ipcMain.handle('safety:check', (_e, id: string, sql: string) => {
     const settings = store.getSettings()
-    const cfg = db.getConfig(id)
+    const cfg = store.getFullConfig(id) ?? db.getConfig(id)
     const statements = splitStatements(sql)
     const unscoped = statements.filter((s) => isUnscopedWrite(s))
     const isProd = cfg?.environment === 'production'
@@ -227,7 +254,27 @@ function registerHandlers(): void {
     async (e, id: string, transcript: ChatMessage[], sql: string, approved: boolean) => {
       try {
         const schema = await db.getSchema(id)
-        const cfg = db.getConfig(id)
+        const cfg = store.getFullConfig(id) ?? db.getConfig(id)
+        if (approved && cfg?.accessMode === 'read-only') {
+          const blocked = {
+            sql,
+            autoRun: false,
+            status: 'failed' as const,
+            error: READ_ONLY_ERROR
+          }
+          return {
+            reply: 'This connection is locked to read-only, so nothing was changed.',
+            queries: [blocked],
+            transcript: [
+              ...transcript,
+              {
+                role: 'user' as const,
+                content:
+                  'The connection is read-only, so that statement was not run. Do not retry a write unless the access policy changes.'
+              }
+            ]
+          }
+        }
         const send = (text: string): void => {
           if (!e.sender.isDestroyed()) e.sender.send('ai:chat-delta', text)
         }

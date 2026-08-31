@@ -1,8 +1,9 @@
-import type { Driver } from '../shared/types'
+import type { AccessMode, Driver } from '../shared/types'
 import {
   mainStatementWord,
   maskSqlForAnalysis,
   scanSqlWords,
+  splitStatements,
   type SqlWord
 } from '../shared/sqlscan'
 export { quoteIdent } from '../shared/sql'
@@ -147,4 +148,32 @@ export function canAutoRun(statements: string[]): AutoRunVerdict {
     if (hit) return { autoRun: false, reason: `contains ${hit[0].trim().toUpperCase()}` }
   }
   return { autoRun: true }
+}
+
+export interface AccessModeVerdict {
+  allowed: boolean
+  reason?: string
+}
+
+/**
+ * Enforces the connection's execution policy in the trusted main process.
+ *
+ * Read-only deliberately reuses the AI allowlist instead of maintaining a
+ * second, looser parser. That means the guarantee is simple: one plainly
+ * read-only SELECT is allowed; anything ambiguous, stateful or multi-statement
+ * is blocked before it reaches a driver. This is defense in depth, not a
+ * substitute for a least-privilege database role.
+ */
+export function canRunInAccessMode(
+  accessMode: AccessMode | undefined,
+  sql: string
+): AccessModeVerdict {
+  if (accessMode !== 'read-only') return { allowed: true }
+  const verdict = canAutoRun(splitStatements(sql))
+  if (verdict.autoRun) return { allowed: true }
+  return {
+    allowed: false,
+    reason:
+      'This connection is read-only. OpenTable only allows a single plainly read-only SELECT in this mode.'
+  }
 }

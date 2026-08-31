@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import '@fontsource-variable/inter'
 import '@fontsource-variable/jetbrains-mono'
 import './styles.css'
+import './operator.css'
 import App from './App'
 
 // Opened in a plain browser rather than Electron: install a fake bridge so the

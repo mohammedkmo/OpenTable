@@ -3,6 +3,13 @@ export type Driver = 'postgres' | 'mysql' | 'sqlite'
 /** Visual + safety tier for a connection. `production` gates destructive queries. */
 export type Environment = 'local' | 'staging' | 'production'
 
+/**
+ * Per-connection execution policy. `read-only` is a strict application guard:
+ * only plainly read-only SELECTs may execute through any OpenTable surface.
+ * Database roles remain the authority for real user/tenant authorization.
+ */
+export type AccessMode = 'read-write' | 'read-only'
+
 export type ReferentialAction =
   | 'NO ACTION'
   | 'CASCADE'
@@ -38,6 +45,8 @@ export interface ConnectionConfig {
   sslInsecure?: boolean
   ssh?: SshConfig
   environment?: Environment
+  /** Defaults to read-write for existing saved connections. */
+  accessMode?: AccessMode
   color?: string
 }
 
