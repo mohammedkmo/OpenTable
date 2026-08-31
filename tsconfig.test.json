@@ -11,6 +11,7 @@
   },
   "include": [
     "src/shared/**/*.ts",
-    "src/main/sqlutil.ts"
+    "src/main/sqlutil.ts",
+    "src/main/knownhosts.ts"
   ]
 }

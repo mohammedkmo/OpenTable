@@ -24,6 +24,11 @@ import type {
 } from '../shared/types'
 import { mainStatementWord, scanSqlWords, splitStatements } from '../shared/sqlscan'
 import { placeholder, quoteIdent, quoteLiteral, type BuiltStatement } from './sqlutil'
+import {
+  describeHostKeyFailure,
+  verifyKnownHostKey,
+  type KnownHostCheck
+} from './knownhosts'
 
 export { splitStatements } from '../shared/sqlscan'
 
@@ -164,7 +169,16 @@ function loadPrivateKey(explicitPath?: string, passphrase?: string): KeyMaterial
 }
 
 /** Turns ssh2's terse failures into something a user can act on. */
-function describeSshError(err: Error, tried: string[], ssh: SshConfig): string {
+function describeSshError(
+  err: Error,
+  tried: string[],
+  ssh: SshConfig,
+  hostKeyCheck?: KnownHostCheck
+): string {
+  if (hostKeyCheck && hostKeyCheck.status !== 'trusted') {
+    return describeHostKeyFailure(ssh.host, ssh.port || 22, ssh.user, hostKeyCheck)
+  }
+
   const m = err.message || String(err)
   const attempted = tried.length ? ` Tried: ${tried.join(', ')}.` : ''
 
@@ -261,6 +275,7 @@ async function openTunnel(cfg: ConnectionConfig): Promise<Tunnel> {
 
     const client = new SshClient()
     let settled = false
+    let hostKeyCheck: KnownHostCheck | undefined
     const fail = (err: Error): void => {
       if (settled) return
       settled = true
@@ -269,7 +284,7 @@ async function openTunnel(cfg: ConnectionConfig): Promise<Tunnel> {
       } catch {
         /* noop */
       }
-      reject(new Error(describeSshError(err, tried, ssh)))
+      reject(new Error(describeSshError(err, tried, ssh, hostKeyCheck)))
     }
 
     client
@@ -299,6 +314,12 @@ async function openTunnel(cfg: ConnectionConfig): Promise<Tunnel> {
         host: ssh.host,
         port: sshPort,
         username: ssh.user,
+        // ssh2 calls hostVerifier during key exchange, before user authentication.
+        // Fail closed so a password/private key is never sent to an untrusted host.
+        hostVerifier: (key: Buffer) => {
+          hostKeyCheck = verifyKnownHostKey(ssh.host, sshPort, key)
+          return hostKeyCheck.status === 'trusted'
+        },
         password: mode === 'password' ? ssh.password || undefined : undefined,
         privateKey: usableKey,
         passphrase: ssh.passphrase || undefined,
@@ -1263,7 +1284,10 @@ export async function getTableDetails(
 
       const created = createdRows[0] as Record<string, string>[]
       ddl = created[0]?.['Create Table'] ?? ''
-      const meta = (metaRows[0] as { estimated_rows: number | string | null; size_bytes: number | string | null }[])[0]
+      const meta = (metaRows[0] as {
+        estimated_rows: number | string | null
+        size_bytes: number | string | null
+      }[])[0]
       if (meta?.estimated_rows != null) {
         rowCount = Number(meta.estimated_rows)
         rowCountApproximate = true
